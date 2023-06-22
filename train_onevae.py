@@ -43,7 +43,7 @@ def evaluate(model, eval_dl, vocex, stats, phone2idx):
     is_first = True
     with torch.no_grad():
         for batch in eval_dl:
-            vocex_results = vocex.model(batch["mel"], inference=True)
+            vocex_results = vocex(batch["mel"], inference=True)
             x = create_input(batch, vocex_results, stats)
             condition = create_condition(batch, phone2idx)
             output, mean, logvar = model(x, condition, batch["speaker"])
@@ -120,9 +120,10 @@ def evaluate(model, eval_dl, vocex, stats, phone2idx):
                     vmax=max_val,
                 )
                 # disable x and y ticks
-                for i in range(4):
+                for i in range(6):
                     ax[i].set_xticks([])
                     ax[i].set_yticks([])
+                wandb.log({"val/heatmap": wandb.Image(plt)})
                 plt.savefig("test.png")
                 plt.close()
             is_first = False
@@ -184,18 +185,20 @@ def main():
     else:
         args = parser.parse_args_into_dataclasses()[0]
 
-    wandb.init(
-        name=args.wandb_run_name,
-        project=args.wandb_project,
-        mode=args.wandb_mode,
-    )
-    wandb.config.update(args)
-
     accelerator = Accelerator()
+
+    if accelerator.is_local_main_process:
+        wandb.init(
+            name=args.wandb_run_name,
+            project=args.wandb_project,
+            mode=args.wandb_mode,
+        )
+        wandb.config.update(args)
 
     with accelerator.main_process_first():
         libritts = load_dataset(args.dataset)
         vocex = Vocex.from_pretrained(args.vocex)
+        vocex_model = vocex.model
         if not Path("training/data").exists():
             Path("training/data").mkdir()
         if not Path("training/data/speaker2idx.json").exists():
@@ -271,8 +274,8 @@ def main():
         num_training_steps=num_training_steps,
     )
 
-    train_dl, eval_dl, model, optimizer, scheduler = accelerator.prepare(
-        train_dl, eval_dl, model, optimizer, scheduler
+    train_dl, eval_dl, model, optimizer, scheduler, vocex_model = accelerator.prepare(
+        train_dl, eval_dl, model, optimizer, scheduler, vocex_model
     )
 
     model.train()
@@ -285,7 +288,7 @@ def main():
 
     for _ in range(num_epochs):
         for batch in train_dl:
-            vocex_results = vocex.model(batch["mel"], inference=True)
+            vocex_results = vocex_model(batch["mel"], inference=True)
             x = create_input(batch, vocex_results, stats)
             condition = create_condition(batch, phone2idx)
             speaker = batch["speaker"]
@@ -338,11 +341,13 @@ def main():
 
             if step % args.eval_every == 0 and step > 0:
                 if accelerator.is_local_main_process:
-                    evaluate(model, eval_dl, vocex, stats, phone2idx)
+                    evaluate(model, eval_dl, vocex_model, stats, phone2idx)
                 accelerator.wait_for_everyone()
 
             if step % args.save_every == 0 and step > 0:
-                pass
+                if accelerator.is_local_main_process:
+                    accelerator.save(model.state_dict(), Path(args.checkpoint_dir) / f"model-{step}.pt")
+                accelerator.wait_for_everyone()
 
             progress_bar.update(1)
             step += 1
