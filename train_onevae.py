@@ -152,6 +152,7 @@ def create_input(batch, vocex_results, stats):
     # uses stats to normalize pitch, energy, duration
     pitch_mean = (pitch_mean - stats["mean_pitch"][0]) / stats["mean_pitch"][1]
     pitch_std = (pitch_std - stats["std_pitch"][0]) / stats["std_pitch"][1]
+
     energy_mean = (energy_mean - stats["mean_energy"][0]) / stats["mean_energy"][1]
     energy_std = (energy_std - stats["std_energy"][0]) / stats["std_energy"][1]
     duration_mean = (duration_mean - stats["mean_duration"][0]) / stats["mean_duration"][1]
@@ -236,6 +237,7 @@ def main():
         collate_fn=collator.collate_fn,
         num_workers=args.num_workers,
         prefetch_factor=args.prefetch_factor,
+        shuffle=True,
     )
 
     eval_dl = DataLoader(
@@ -293,20 +295,28 @@ def main():
             condition = create_condition(batch, phone2idx)
             speaker = batch["speaker"]
 
-            pred_x, mean, logvar = model(x, condition, speaker)
-
-            recon_loss = torch.nn.functional.mse_loss(pred_x, x, reduction="none").sum(dim=1) / x.shape[1]
-            kl_loss = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp(), dim=1)
-
-            loss = (recon_loss + kl_loss) / 2
-            loss = loss.mean()
-
-            accelerator.backward(loss)
-            optimizer.step()
+            if step % args.sync_every == 0 and step > 0:
+                pred_x, mean, logvar = model(x, condition, speaker)
+                recon_loss = torch.nn.functional.mse_loss(pred_x, x, reduction="none").sum(dim=1) / x.shape[1]
+                kl_loss = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp(), dim=1)
+                loss = (recon_loss + kl_loss) / 2
+                loss = loss.mean()
+                accelerator.backward(loss)
+            else:
+                with accelerator.no_sync(model):
+                    pred_x, mean, logvar = model(x, condition, speaker)
+                    recon_loss = torch.nn.functional.mse_loss(pred_x, x, reduction="none").sum(dim=1) / x.shape[1]
+                    kl_loss = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp(), dim=1)
+                    loss = (recon_loss + kl_loss) / 2
+                    loss = loss.mean()
+                    accelerator.backward(loss)
+            if accelerator.sync_gradients:
+                accelerator.clip_grad_value_(model.parameters(), args.max_grad_norm)
+            
             scheduler.step()
+            optimizer.step()
             optimizer.zero_grad()
 
-            accelerator.clip_grad_value_(model.parameters(), args.max_grad_norm)
 
             losses.append(loss.item())
 

@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.optim as optim
 
 class Encoder(nn.Module):
     def __init__(self, input_size, hidden_size, latent_size, num_layers=3):
@@ -12,10 +11,9 @@ class Encoder(nn.Module):
 
     def forward(self, x):
         # using relu as activation function and residual connections
-        hidden_start = torch.relu(self.fc1(x))
-        hidden = hidden_start
+        hidden = torch.relu(self.fc1(x))
         for layer in self.layers:
-            hidden = hidden_start + torch.relu(layer(hidden))
+            hidden = hidden + torch.relu(layer(hidden))
         mean = self.fc2_mean(hidden)
         logvar = self.fc2_logvar(hidden)
         return mean, logvar
@@ -41,20 +39,24 @@ class Decoder(nn.Module):
         self.data_dropout_p = data_dropout_p
         self.dropout = nn.Dropout(0.2)
         self.layer_norms = nn.ModuleList([nn.LayerNorm(hidden_size) for _ in range(num_layers+1)])
+        self.condition_size = condition_size
 
     def forward(self, z, condition, speaker):
-        hidden_start = torch.relu(self.fc1(z))
+        hidden = torch.relu(self.fc1(z))
         if condition is not None and (self.data_dropout_p > torch.rand(1) or not self.training):
-            hidden_start = hidden_start + torch.relu(self.condition_layer(condition))
+            hidden = hidden + torch.relu(self.condition_layer(condition))
         else:
-            hidden_start = hidden_start + torch.relu(self.condition_layer(torch.zeros_like(condition)))
+            if condition is None:
+                condition = torch.zeros((z.shape[0], self.condition_size))
+            hidden = hidden + torch.relu(self.condition_layer(torch.zeros_like(condition).to(z.device)))
         if speaker is not None and (self.data_dropout_p > torch.rand(1) or not self.training):
-            hidden_start = hidden_start + self.speaker_embedding(speaker)
+            hidden = hidden + self.speaker_embedding(speaker)
         else:
-            hidden_start = hidden_start + self.speaker_embedding(torch.zeros_like(speaker)+self.speaker_unk_idx)
-        hidden = hidden_start
+            if speaker is None:
+                speaker = torch.zeros((z.shape[0],))
+            hidden = hidden + self.speaker_embedding(torch.zeros_like(speaker).long().to(z.device) + self.speaker_unk_idx)
         for i, layer in enumerate(self.layers):
-            hidden = hidden_start + torch.relu(self.layer_norms[i](layer(hidden)))
+            hidden = hidden + torch.relu(self.layer_norms[i](layer(hidden)))
         output = self.fc2(self.layer_norms[-1](hidden))
         return output
 
